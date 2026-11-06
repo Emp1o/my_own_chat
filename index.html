@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Домашний хаб</title>
+  <meta name="description" content="Локальный чат с моделью Ollama на домашнем Windows, через Tailscale.">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500&family=Instrument+Sans:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="top">
+      <div class="brand">
+        <h1><a href="#log">Домашний хаб</a></h1>
+        <dl class="route">
+          <div>
+            <dt>Модель</dt>
+            <dd class="endpoint" id="modelName">qwen2.5:1.5b</dd>
+          </div>
+          <div>
+            <dt>Адрес</dt>
+            <dd class="endpoint" id="baseName">http://100.x.x.x:11434</dd>
+          </div>
+        </dl>
+        <p class="note" id="note">Адрес ещё шаблон. Задай OLLAMA_BASE, Tailscale IP компьютера с Ollama.</p>
+        <p class="note" id="linkStatus">Проверяю прокси и Ollama.</p>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn btn--quiet" id="linkBtn">Связь</button>
+        <button type="button" class="btn btn--quiet" id="clearBtn" disabled>Очистить</button>
+      </div>
+    </header>
+
+    <main class="log" id="log">
+      <div class="empty" id="empty">
+        <h2>Канал молчит</h2>
+        <p>Напиши модели на Windows. Прокси на этом Mac отправит текст через Tailscale.</p>
+      </div>
+    </main>
+    <p class="visually-hidden" id="status" aria-live="polite"></p>
+
+    <div class="undo" id="undo" hidden>
+      <p>Переписка очищена.</p>
+      <button type="button" class="btn btn--quiet" id="undoBtn">Вернуть</button>
+    </div>
+
+    <form id="form" autocomplete="off">
+      <label class="field-label" for="input">Сообщение</label>
+      <div class="dock">
+        <textarea id="input" name="message" rows="1" autofocus aria-describedby="hint"></textarea>
+        <button class="btn btn--primary" id="sendBtn" type="submit">Отправить</button>
+      </div>
+      <p class="hint" id="hint">Enter отправляет. Shift Enter переносит строку.</p>
+    </form>
+    <noscript>
+      <p class="note">Без JavaScript сообщение не уйдёт. Включи его в браузере.</p>
+    </noscript>
+  </div>
+  <script>
+    const log = document.getElementById("log");
+    const empty = document.getElementById("empty");
+    const form = document.getElementById("form");
+    const input = document.getElementById("input");
+    const sendBtn = document.getElementById("sendBtn");
+    const clearBtn = document.getElementById("clearBtn");
+    const undoBar = document.getElementById("undo");
+    const undoBtn = document.getElementById("undoBtn");
+    const hint = document.getElementById("hint");
+    const status = document.getElementById("status");
+    const note = document.getElementById("note");
+    const linkStatus = document.getElementById("linkStatus");
+    const linkBtn = document.getElementById("linkBtn");
+    const modelName = document.getElementById("modelName");
+    const baseName = document.getElementById("baseName");
+    const hintRest = "Enter отправляет. Shift Enter переносит строку.";
+
+    let model = "qwen2.5:1.5b";
+    let messages = [];
+    let pending = false;
+    let undoSnapshot = null;
+    let undoTimer = 0;
+    let turnId = 0;
+    let active = null;
+
+    const backendText = {
+      ok: "Прокси на связи. Ollama на связи.",
+      timeout: "Прокси на связи. Ollama не ответил вовремя. Проверьте, что Windows не спит и Tailscale подключён.",
+      refused: "Прокси на связи. Ollama не принял соединение. Запущен ли он на Windows?",
+      name: "Прокси на связи. Имя в OLLAMA_BASE не нашлось.",
+      unreachable: "Прокси на связи. Сеть до Ollama оборвалась. Проверьте Tailscale.",
+    };
+
+    const chatText = {
+      name: "Имя в адресе не нашлось. Проверьте OLLAMA_BASE. Текст снова в поле.",
+      refused: "Ollama не принял соединение. Запущен ли сервер на Windows? Текст снова в поле.",
+      unreachable: "Сеть до Ollama оборвалась. Проверьте Tailscale. Текст снова в поле.",
+      timeout: "Ollama молчит слишком долго. Проверьте сон Windows и Tailscale. Текст снова в поле.",
+      busy: "Уже есть один запрос. Дождитесь его или нажмите Остановить.",
+    };
+
+    function autosize() {
+      input.style.height = "auto";
+      const next = Math.min(input.scrollHeight, 160);
+      input.style.height = next + "px";
+    }
+
+    function setHint(text, invalid) {
+      hint.textContent = text;
+      hint.classList.toggle("is-error", invalid);
+      if (invalid) input.setAttribute("aria-invalid", "true");
+      else input.removeAttribute("aria-invalid");
+    }
+
+    function turn(role, content) {
+      const article = document.createElement("article");
+      article.className = "turn turn--" + (role === "user" ? "user" : "assistant");
+      const who = document.createElement("p");
+      who.className = "who";
+      who.textContent = role === "user" ? "Максим" : model;
+      const body = document.createElement("div");
+      body.className = "body";
+      body.textContent = content;
+      article.append(who, body);
+      return article;
+    }
+
+    function render() {
+      const nodes = [];
+      if (!messages.length && !pending) nodes.push(empty);
+      for (const item of messages) nodes.push(turn(item.role, item.content));
+      if (pending) {
+        const wait = document.createElement("p");
+        wait.className = "pending";
+        wait.textContent = "Жду ответ модели.";
+        nodes.push(wait);
+      }
+      log.replaceChildren(...nodes);
+      log.scrollTop = log.scrollHeight;
+      clearBtn.disabled = pending || messages.length === 0;
+      sendBtn.textContent = pending ? "Остановить" : "Отправить";
+    }
+
+    function currentTurn(id) {
+      return active && active.id === id && id === turnId;
+    }
+
+    function dropUndo() {
+      undoSnapshot = null;
+      undoBar.hidden = true;
+      window.clearTimeout(undoTimer);
+    }
+
+    function armUndo() {
+      window.clearTimeout(undoTimer);
+      undoTimer = window.setTimeout(dropUndo, 8000);
+    }
+
+    function failHint(text) {
+      setHint(text, true);
+      status.textContent = text;
+    }
+
+    function restoreText(text) {
+      if (!input.value) {
+        input.value = text;
+        autosize();
+      }
+    }
+
+    input.addEventListener("input", () => {
+      autosize();
+      if (input.getAttribute("aria-invalid") === "true" && input.value.trim()) setHint(hintRest, false);
+    });
+
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+
+    clearBtn.addEventListener("click", () => {
+      if (!messages.length || pending) return;
+      undoSnapshot = messages;
+      messages = [];
+      setHint(hintRest, false);
+      undoBar.hidden = false;
+      armUndo();
+      status.textContent = "Переписка очищена.";
+      render();
+    });
+
+    undoBtn.addEventListener("click", () => {
+      if (!undoSnapshot) return;
+      messages = undoSnapshot;
+      dropUndo();
+      status.textContent = "Переписка возвращена.";
+      render();
+    });
+
+    undoBar.addEventListener("pointerenter", () => window.clearTimeout(undoTimer));
+    undoBar.addEventListener("pointerleave", () => { if (undoSnapshot) armUndo(); });
+    undoBar.addEventListener("focusin", () => window.clearTimeout(undoTimer));
+    undoBar.addEventListener("focusout", () => { if (undoSnapshot) armUndo(); });
+
+    function stopTurn() {
+      if (!active) return;
+      const mine = active;
+      active = null;
+      turnId += 1;
+      mine.controller.abort();
+      pending = false;
+      const last = messages[messages.length - 1];
+      if (last && last.role === "user" && last.content === mine.text) {
+        messages.pop();
+        restoreText(mine.text);
+      }
+      sendBtn.removeAttribute("aria-busy");
+      failHint("Запрос остановлен. Соединение с Ollama закрыто.");
+      render();
+      input.focus();
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (pending) {
+        stopTurn();
+        return;
+      }
+      const text = input.value.trim();
+      if (!text) {
+        setHint("Сначала напиши сообщение.", true);
+        input.focus();
+        return;
+      }
+      setHint(hintRest, false);
+      dropUndo();
+      const id = ++turnId;
+      const controller = new AbortController();
+      active = { id, controller, text };
+      messages.push({ role: "user", content: text });
+      input.value = "";
+      autosize();
+      pending = true;
+      sendBtn.setAttribute("aria-busy", "true");
+      render();
+      try {
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Request-Id": String(id) },
+          body: JSON.stringify({ model, messages }),
+          signal: controller.signal,
+        });
+        if (!currentTurn(id)) return;
+        const echoed = response.headers.get("X-Request-Id");
+        if (echoed !== String(id)) return;
+        let data = {};
+        try { data = await response.json(); } catch { data = {}; }
+        if (!currentTurn(id)) return;
+        if (!response.ok) {
+          messages.pop();
+          restoreText(text);
+          failHint(chatText[data.error] || "Ollama ответил с ошибкой. Текст снова в поле.");
+          checkLink();
+          return;
+        }
+        const reply = (data.message && data.message.content) || data.response || "";
+        if (!reply) {
+          messages.pop();
+          restoreText(text);
+          failHint("Модель вернула пустой ответ. Текст снова в поле.");
+          return;
+        }
+        messages.push({ role: "assistant", content: reply });
+        status.textContent = reply;
+      } catch {
+        if (!currentTurn(id)) return;
+        messages.pop();
+        restoreText(text);
+        failHint("Не дошёл до прокси. Запущен ли python3 server.py на этом Mac? Текст снова в поле.");
+      } finally {
+        if (currentTurn(id)) {
+          active = null;
+          pending = false;
+          sendBtn.removeAttribute("aria-busy");
+          render();
+          input.focus();
+        }
+      }
+    });
+
+    async function checkLink() {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
+      try {
+        const response = await fetch("/api/health", { signal: controller.signal });
+        if (!response.ok) throw new Error("health");
+        const data = await response.json();
+        linkStatus.textContent = backendText[data.backend] || backendText.unreachable;
+      } catch {
+        linkStatus.textContent = "Прокси не ответил. Запущен ли python3 server.py на этом Mac?";
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    linkBtn.addEventListener("click", () => { checkLink(); });
+
+    async function loadConfig() {
+      try {
+        const response = await fetch("/api/config");
+        if (!response.ok) throw new Error("config");
+        const data = await response.json();
+        model = data.model || model;
+        modelName.textContent = model;
+        baseName.textContent = data.ollama_base || "?";
+        const placeholder = String(data.ollama_base || "").includes("100.x.x.x");
+        note.hidden = !placeholder;
+        if (placeholder) note.textContent = "Адрес ещё шаблон. Задай OLLAMA_BASE, Tailscale IP компьютера с Ollama.";
+      } catch {
+        note.hidden = false;
+        note.textContent = "Прокси не ответил. Обнови страницу.";
+      }
+    }
+
+    loadConfig();
+    checkLink();
+  </script>
+</body>
+</html>

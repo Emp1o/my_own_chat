@@ -1,4 +1,4 @@
-"""How Maxim's browser uses the local proxy.
+"""HTTP tests for the local chat proxy.
 
 The checks speak HTTP. They do not call the handler's methods.
 """

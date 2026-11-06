@@ -1,8 +1,3 @@
-/* Hallmark · shape: app screen · genre: atmospheric · theme: Ribbon (deal 2/3, seed small-local-mac-chat-8a07·fd045984·2026-11-04·r0)
- * nav: top bar, wordmark and clear · signature: the transcript · states: empty, loading, error, full · ribbon: two-in-the-morning
- * axes: dark/grotesk-sans/amber · posture: committed · contrast: pass · v2.0.0 */
-/* Hallmark · pre-emit critique: P4 H5 E4 S4 R5 V4 · weakest: S, a bare chat could be any assistant; the bar names the home model and Tailscale address */
-/* Hallmark · finish-review: subagent · 4 findings · 4 resolved · gap: none */
 @import url("./tokens.css");
 @import url("./base.css");
 

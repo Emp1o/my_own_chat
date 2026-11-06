@@ -1,8 +1,8 @@
 # Домашний хаб
 
-Локальный чат на Mac. Браузер говорит только с прокси на `127.0.0.1`. Прокси ходит по Tailscale на Ollama, который крутится на домашнем Windows.
+Локальный чат на Mac. Браузер говорит только с прокси на `127.0.0.1`. Прокси ходит по Tailscale на Ollama, который крутится на домашнем Windows. По умолчанию это Ollama. LM Studio на этом же Mac включается отдельно.
 
-A local chat on the Mac. The browser talks only to a proxy on `127.0.0.1`. The proxy forwards to Ollama on the home Windows PC over Tailscale.
+A local chat on the Mac. The browser talks only to a proxy on `127.0.0.1`. The proxy forwards to Ollama on the home Windows PC over Tailscale. The default stays Ollama. LM Studio on this Mac is a separate explicit option.
 
 ## Запуск
 
@@ -34,6 +34,9 @@ python3 server.py
 | `OLLAMA_MODEL` | `qwen2.5:1.5b` | Модель |
 | `CHAT_HOST` | `127.0.0.1` | Только loopback. `0.0.0.0` и адрес сети отклоняются |
 | `CHAT_PORT` | `8765` | Порт прокси на этом Mac |
+| `CHAT_PROVIDER` | `ollama` | `ollama` или `lmstudio`. Без значения остаётся Ollama. Сам провайдер не переключается |
+| `LMSTUDIO_BASE` | нет | Только для `lmstudio`. Origin `http://127.0.0.1:1234`, порт обязателен, без пути `/v1`. Другой хост отклоняется |
+| `LMSTUDIO_MODEL` | нет | Только для `lmstudio`. Id модели, например `qwen/qwen3.5-9b`. Список `/v1/models` модель не выбирает |
 
 ## Безопасность
 
@@ -55,6 +58,38 @@ python3 server.py
 Если Windows спит или сеть пропала, запрос кончается по таймауту (соединение до 5 с, чтение до 120 с), без бесконечного ожидания. В лог пишутся только метод и путь.
 
 Если локальная копия уже есть, сохрани её перед заменой. Не затирай `chat.local.json` и свой `OLLAMA_BASE`.
+
+## LM Studio на этом Mac
+
+Явный режим, не запасной и не автоматический. Ollama при этом не вызывается.
+
+```bash
+export CHAT_PROVIDER=lmstudio
+export LMSTUDIO_BASE=http://127.0.0.1:1234
+export LMSTUDIO_MODEL=qwen/qwen3.5-9b
+python3 server.py
+```
+
+Тот же набор в `chat.local.json` (файл в git не входит). Переменные окружения важнее файла:
+
+```json
+{"provider": "lmstudio", "lmstudio_base": "http://127.0.0.1:1234", "model": "qwen/qwen3.5-9b"}
+```
+
+Прокси сам добавляет официальные пути: `GET /v1/models` для проверки и `POST /v1/chat/completions` для чата. В теле чата `stream` выключен, `max_tokens` равен 512, `reasoning_effort` равен `none`. Браузер не может подменить адрес. Инструменты, картинки и MCP не отправляются.
+
+`reasoning_effort` на `/v1/chat/completions` добавлен в LM Studio 0.4.8. Значение `none` — это значение OpenAI для отключения рассуждения. Поле нативного API `reasoning: "off"` относится к другому пути и сюда не пишется. Переключатель Think в окне LM Studio этот прокси не читает. Если сервер отклонит `reasoning_effort`, прокси вернёт ошибку и не повторит запрос через Ollama.
+
+Вернуться к Ollama:
+
+```bash
+unset CHAT_PROVIDER LMSTUDIO_BASE LMSTUDIO_MODEL
+export OLLAMA_BASE=http://100.64.0.2:11434
+export OLLAMA_MODEL=qwen2.5:1.5b
+python3 server.py
+```
+
+Подставь свой адрес Ollama. Если в `chat.local.json` остался `"provider": "lmstudio"`, поставь `"provider": "ollama"` или убери этот ключ и задай `ollama_base`.
 
 ## Проверка
 

@@ -24,7 +24,7 @@
           </div>
         </dl>
         <p class="note" id="note">Адрес ещё шаблон. Задай OLLAMA_BASE, Tailscale IP компьютера с Ollama.</p>
-        <p class="note" id="linkStatus">Проверяю прокси и Ollama.</p>
+        <p class="note" id="linkStatus">Проверяю прокси.</p>
       </div>
       <div class="actions">
         <button type="button" class="btn btn--quiet" id="linkBtn">Связь</button>
@@ -76,6 +76,7 @@
     const baseName = document.getElementById("baseName");
     const hintRest = "Enter отправляет. Shift Enter переносит строку.";
 
+    let provider = "ollama";
     let model = "qwen2.5:1.5b";
     let messages = [];
     let pending = false;
@@ -99,6 +100,27 @@
       timeout: "Ollama молчит слишком долго. Проверьте сон Windows и Tailscale. Текст снова в поле.",
       busy: "Уже есть один запрос. Дождитесь его или нажмите Остановить.",
     };
+
+    const lmBackendText = {
+      ok: "Прокси на связи. LM Studio на связи.",
+      timeout: "Прокси на связи. LM Studio не ответил вовремя.",
+      refused: "Прокси на связи. LM Studio не принял соединение. Запущен ли сервер на 127.0.0.1?",
+      name: "Прокси на связи. Имя в адресе не нашлось.",
+      unreachable: "Прокси на связи. LM Studio не ответил.",
+    };
+
+    const lmChatText = {
+      name: "Имя в адресе не нашлось. Текст снова в поле.",
+      refused: "LM Studio не принял соединение. Запущен ли сервер на 127.0.0.1? Текст снова в поле.",
+      unreachable: "LM Studio не ответил. Текст снова в поле.",
+      timeout: "LM Studio молчит слишком долго. Текст снова в поле.",
+      busy: "Уже есть один запрос. Дождитесь его или нажмите Остановить.",
+    };
+
+    function statusText(table, lmTable, code) {
+      const chosen = provider === "lmstudio" ? lmTable : table;
+      return chosen[code] || "";
+    }
 
     function autosize() {
       input.style.height = "auto";
@@ -218,7 +240,9 @@
         restoreText(mine.text);
       }
       sendBtn.removeAttribute("aria-busy");
-      failHint("Запрос остановлен. Соединение с Ollama закрыто.");
+      failHint(provider === "lmstudio"
+        ? "Запрос остановлен. Соединение с LM Studio закрыто."
+        : "Запрос остановлен. Соединение с Ollama закрыто.");
       render();
       input.focus();
     }
@@ -262,7 +286,7 @@
         if (!response.ok) {
           messages.pop();
           restoreText(text);
-          failHint(chatText[data.error] || "Ollama ответил с ошибкой. Текст снова в поле.");
+          failHint(statusText(chatText, lmChatText, data.error) || "Модель ответила с ошибкой. Текст снова в поле.");
           checkLink();
           return;
         }
@@ -298,7 +322,8 @@
         const response = await fetch("/api/health", { signal: controller.signal });
         if (!response.ok) throw new Error("health");
         const data = await response.json();
-        linkStatus.textContent = backendText[data.backend] || backendText.unreachable;
+        linkStatus.textContent = statusText(backendText, lmBackendText, data.backend)
+          || (provider === "lmstudio" ? lmBackendText.unreachable : backendText.unreachable);
       } catch {
         linkStatus.textContent = "Прокси не ответил. Запущен ли python3 server.py на этом Mac?";
       } finally {
@@ -313,12 +338,21 @@
         const response = await fetch("/api/config");
         if (!response.ok) throw new Error("config");
         const data = await response.json();
+        provider = data.provider === "lmstudio" ? "lmstudio" : "ollama";
         model = data.model || model;
         modelName.textContent = model;
-        baseName.textContent = data.ollama_base || "?";
-        const placeholder = String(data.ollama_base || "").includes("100.x.x.x");
-        note.hidden = !placeholder;
-        if (placeholder) note.textContent = "Адрес ещё шаблон. Задай OLLAMA_BASE, Tailscale IP компьютера с Ollama.";
+        const base = data.upstream || data.ollama_base || "?";
+        baseName.textContent = base;
+        const placeholder = provider !== "lmstudio" && String(base).includes("100.x.x.x");
+        const emptyLine = empty.querySelector("p");
+        if (provider === "lmstudio") {
+          note.hidden = false;
+          note.textContent = "LM Studio на этом Mac. Модель задана сервером.";
+          if (emptyLine) emptyLine.textContent = "Напиши модели. Прокси на этом Mac отправит текст в LM Studio.";
+        } else {
+          note.hidden = !placeholder;
+          if (placeholder) note.textContent = "Адрес ещё шаблон. Задай OLLAMA_BASE, Tailscale IP компьютера с Ollama.";
+        }
       } catch {
         note.hidden = false;
         note.textContent = "Прокси не ответил. Обнови страницу.";

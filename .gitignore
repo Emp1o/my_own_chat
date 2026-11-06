@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.metrics/
+target/
+.coverage
+htmlcov/
+chat.local.json
+.env
+.env.*
+*.pem
+*.key
+id_rsa*
+.DS_Store

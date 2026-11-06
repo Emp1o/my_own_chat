@@ -1,0 +1,26 @@
+:root {
+  color-scheme: dark;
+  --space-3xs: 2px; --space-2xs: 4px; --space-xs: 8px; --space-sm: 12px; --space-md: 16px; --space-lg: 24px; --space-xl: 40px; --space-2xl: 64px; --space-3xl: 96px; --space-4xl: 144px;
+  --text-xs: 0.75rem; --text-sm: 0.875rem; --text-md: 1rem; --text-lg: 1.2rem; --text-xl: 1.44rem; --text-2xl: 1.728rem; --text-3xl: 2.074rem;
+  --text-display-s: 1.44rem; --text-display: 1.728rem; --text-section: 1.2rem; --text-title: 1rem; --text-lead: 1rem;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1); --ease-in: cubic-bezier(0.7, 0, 0.84, 0); --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms; --dur-short: 220ms; --dur-long: 420ms;
+  --color-error: oklch(78% 0.14 27); --color-success: oklch(78% 0.12 150);
+  --container: 1440px; --gutter: 64px; --gap-columns: 32px; --section-gap-s: 120px; --section-gap: 144px; --section-gap-l: 176px;
+  --z-base: 1; --z-raised: 10; --z-dropdown: 100; --z-sticky: 200; --z-sticky-nav: 300; --z-modal: 400; --z-toast: 500; --z-tooltip: 600;
+  --color-paper: oklch(13.2% 0.022 258); --color-paper-2: oklch(16.4% 0.024 258); --color-paper-3: oklch(21.5% 0.028 258);
+  --color-ink: oklch(93.5% 0.012 85); --color-ink-2: oklch(86% 0.016 85); --color-muted: oklch(76% 0.022 255);
+  --color-rule: oklch(32% 0.022 255); --color-rule-2: oklch(27% 0.02 255);
+  --color-accent: oklch(82% 0.095 68); --color-accent-2: oklch(88% 0.08 75); --color-accent-soft: oklch(28% 0.045 68); --color-accent-ink: oklch(24% 0.04 62); --color-focus: oklch(84% 0.14 68);
+  --color-band: oklch(13.2% 0.022 258); --color-band-ink: oklch(93.5% 0.012 85);
+  --color-slot: oklch(40% 0.03 80);
+  --metal-hi: oklch(44% 0.012 255); --metal-lo: oklch(25% 0.014 255);
+  --edge-light: inset 0 1px 0 oklch(93% 0.012 85 / 0.22);
+  --shadow-part: 0 1px 0 oklch(8% 0.02 258 / 0.5), 0 8px 16px -8px oklch(8% 0.02 258 / 0.55);
+  --shadow-panel: 0 1px 0 oklch(8% 0.02 258 / 0.45), 0 24px 40px -16px oklch(8% 0.02 258 / 0.6);
+  --font-display: "Instrument Sans", ui-sans-serif, system-ui, sans-serif; --font-body: "Figtree", ui-sans-serif, system-ui, sans-serif;
+  --font-outlier: "JetBrains Mono", ui-monospace, monospace;
+  --radius-card: 20px; --radius-part: 6px; --radius-pill: 999px; --rule-hair: 1px;
+  --shadow-card: none;
+  --tracking-display: -0.035em; --display-weight: 400;
+}

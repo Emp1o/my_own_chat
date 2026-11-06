@@ -3,7 +3,8 @@
 
 Glossary:
 - Proxy: this process. The browser talks only to it.
-- Upstream: Ollama at one fixed base, from the environment or chat.local.json.
+- Upstream: one fixed base, from the environment or chat.local.json.
+- Provider: ollama (default) or an explicit loopback LM Studio.
 - Turn: one chat message, a role and some content.
 - Transcript: the turns the page sends as messages.
 
@@ -41,7 +42,21 @@ BASE_ERROR = (
     "OLLAMA_BASE is rejected when it is public, a file URL, or has a path."
 )
 HOST_ERROR = "CHAT_HOST must be 127.0.0.1. The chat proxy does not listen on the network."
-MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
+MODEL_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}(?:/[A-Za-z0-9][A-Za-z0-9_.:-]{0,79})?$"
+)
+LMSTUDIO_MAX_TOKENS = 512
+# LM Studio 0.4.8 accepts reasoning_effort on /v1/chat/completions.
+# "none" is OpenAI's documented no-reasoning value. Native reasoning "off"
+# belongs to /api/v1/chat and is not sent on this path.
+LMSTUDIO_REASONING = "none"
+PROVIDER_ERROR = "CHAT_PROVIDER must be ollama or lmstudio."
+LMSTUDIO_ERROR = (
+    "Set CHAT_PROVIDER=lmstudio, LMSTUDIO_MODEL to a model id, and "
+    "LMSTUDIO_BASE to http://127.0.0.1:1234 with a port and no path. "
+    "chat.local.json may set provider, lmstudio_base, and model instead. "
+    "Other hosts are rejected. OLLAMA_BASE is not used."
+)
 ROLES = frozenset({"system", "user", "assistant"})
 ALLOWED = (
     ipaddress.ip_network("127.0.0.0/8"),
@@ -71,12 +86,25 @@ class Config:
     host: str
     port: int
     root: Path
+    provider: str = "ollama"
+    lmstudio_base: str = ""
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "ollama_base", normalize_base(self.ollama_base))
-        object.__setattr__(self, "model", clean_model(self.model, DEFAULT_MODEL))
+        provider = clean_provider(self.provider)
+        object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "host", loopback_host(self.host))
         object.__setattr__(self, "port", tcp_port(self.port))
+        if provider == "lmstudio":
+            chosen = _text(self.model)
+            if not chosen:
+                raise ValueError(LMSTUDIO_ERROR)
+            object.__setattr__(self, "model", clean_model(chosen, chosen))
+            object.__setattr__(self, "lmstudio_base", loopback_base(self.lmstudio_base))
+            object.__setattr__(self, "ollama_base", "")
+        else:
+            object.__setattr__(self, "model", clean_model(self.model, DEFAULT_MODEL))
+            object.__setattr__(self, "ollama_base", normalize_base(self.ollama_base))
+            object.__setattr__(self, "lmstudio_base", "")
 
 
 def loopback_host(host: str) -> str:
@@ -113,6 +141,39 @@ def reject_decorations(raw: str, parts: urllib.parse.SplitResult) -> None:
         raise ValueError(BASE_ERROR)
     if parts.query or parts.fragment or parts.path not in {"", "/"}:
         raise ValueError(BASE_ERROR)
+
+
+def clean_provider(value: object) -> str:
+    if value is None:
+        return "ollama"
+    if not isinstance(value, str):
+        raise ValueError(PROVIDER_ERROR)
+    cleaned = value.strip().lower()
+    if cleaned in {"", "ollama"}:
+        return "ollama"
+    if cleaned == "lmstudio":
+        return "lmstudio"
+    raise ValueError(PROVIDER_ERROR)
+
+
+def loopback_base(url: str) -> str:
+    try:
+        normalized = normalize_base(url)
+    except ValueError:
+        raise ValueError(LMSTUDIO_ERROR) from None
+    parts = urllib.parse.urlsplit(normalized)
+    host = parts.hostname or ""
+    if host == "localhost":
+        return f"{parts.scheme}://127.0.0.1:{parts.port}"
+    if host != "127.0.0.1":
+        raise ValueError(LMSTUDIO_ERROR)
+    return normalized
+
+
+def active_base(config: Config) -> str:
+    if config.provider == "lmstudio":
+        return config.lmstudio_base
+    return config.ollama_base
 
 
 def normalize_base(url: str) -> str:
@@ -153,16 +214,34 @@ def _text(value: object) -> str:
 
 def config_from_env(root: Path = ROOT) -> Config:
     stored = local_settings(root)
+    provider = clean_provider(
+        _text(os.environ.get("CHAT_PROVIDER")) or _text(stored.get("provider")) or "ollama"
+    )
+    host = os.environ.get("CHAT_HOST", "127.0.0.1")
+    port = tcp_port(os.environ.get("CHAT_PORT", "8765"))
+    if provider == "lmstudio":
+        base = _text(os.environ.get("LMSTUDIO_BASE")) or _text(stored.get("lmstudio_base"))
+        model = _text(os.environ.get("LMSTUDIO_MODEL")) or _text(stored.get("model"))
+        if not base or not model:
+            raise ValueError(LMSTUDIO_ERROR)
+        return Config(
+            ollama_base="",
+            model=model,
+            host=host,
+            port=port,
+            root=root,
+            provider="lmstudio",
+            lmstudio_base=base,
+        )
     base = _text(os.environ.get("OLLAMA_BASE")) or _text(stored.get("ollama_base"))
     if not base:
         raise ValueError(BASE_ERROR)
     model = _text(os.environ.get("OLLAMA_MODEL")) or _text(stored.get("model")) or DEFAULT_MODEL
-    host = os.environ.get("CHAT_HOST", "127.0.0.1")
     return Config(
         ollama_base=base,
         model=model,
         host=host,
-        port=tcp_port(os.environ.get("CHAT_PORT", "8765")),
+        port=port,
         root=root,
     )
 
@@ -235,9 +314,20 @@ def clean_messages(items: object) -> list:
     return [clean_message(item) for item in items]
 
 
-def chat_body(raw: bytes, default_model: str) -> bytes:
+def chat_body(raw: bytes, default_model: str, provider: str = "ollama") -> bytes:
     data = parse_object(raw)
     messages = clean_messages(data.get("messages"))
+    if provider == "lmstudio":
+        model = clean_model(default_model, default_model)
+        return json_bytes(
+            {
+                "model": model,
+                "messages": messages,
+                "stream": False,
+                "max_tokens": LMSTUDIO_MAX_TOKENS,
+                "reasoning_effort": LMSTUDIO_REASONING,
+            }
+        )
     model = clean_model(data.get("model"), default_model)
     return json_bytes({"model": model, "messages": messages, "stream": False})
 
@@ -394,10 +484,34 @@ def transport_error(err: OSError) -> tuple[int, bytes]:
     return status, error_bytes(code)
 
 
-def probe_backend(base: str) -> str:
+def lmstudio_reply(status: int, body: bytes) -> tuple[int, bytes]:
+    if status != 200:
+        code = None
+        try:
+            parsed = json.loads(body).get("error")
+        except (UnicodeError, json.JSONDecodeError, AttributeError):
+            parsed = None
+        if parsed in BACKEND_CODES:
+            code = str(parsed)
+        return status, error_bytes(code or "unreachable")
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return 502, error_bytes("unreachable")
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return 502, error_bytes("unreachable")
+    message = choices[0].get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str) or not content.strip():
+        return 502, error_bytes("unreachable")
+    return 200, json_bytes({"message": {"role": "assistant", "content": content}})
+
+
+def probe_backend(base: str, path: str = "/api/tags") -> str:
     call = UpstreamCall(base)
     try:
-        status, body = call.exchange("GET", "/api/tags", None, health_timeout(), health_timeout())
+        status, body = call.exchange("GET", path, None, health_timeout(), health_timeout())
     finally:
         call.close()
     if status == 200:
@@ -411,7 +525,13 @@ def probe_backend(base: str) -> str:
     return "unreachable"
 
 
-def run_chat(base: str, payload: bytes, connection: socket.socket) -> tuple[int, bytes] | None:
+def run_chat(
+    base: str,
+    payload: bytes,
+    connection: socket.socket,
+    path: str = "/api/chat",
+    adapt=None,
+) -> tuple[int, bytes] | None:
     if not CHAT_SLOT.acquire(blocking=False):
         return 429, error_bytes("busy")
     call = UpstreamCall(base)
@@ -420,7 +540,8 @@ def run_chat(base: str, payload: bytes, connection: socket.socket) -> tuple[int,
 
     def worker() -> None:
         try:
-            box["result"] = call.exchange("POST", "/api/chat", payload, read_timeout())
+            status, body = call.exchange("POST", path, payload, read_timeout())
+            box["result"] = adapt(status, body) if adapt is not None else (status, body)
         finally:
             done.set()
 
@@ -470,13 +591,22 @@ def make_handler(config: Config):
             route = self.path.split("?", 1)[0]
             if route == "/api/config":
                 body = json_bytes(
-                    {"ollama_base": config.ollama_base, "model": config.model}
+                    {
+                        "provider": config.provider,
+                        "ollama_base": config.ollama_base,
+                        "upstream": active_base(config),
+                        "model": config.model,
+                    }
                 )
                 self._send(200, body, JSON)
                 return
             if route == "/api/health":
+                health_path = "/v1/models" if config.provider == "lmstudio" else "/api/tags"
                 body = json_bytes(
-                    {"proxy": "ok", "backend": probe_backend(config.ollama_base)}
+                    {
+                        "proxy": "ok",
+                        "backend": probe_backend(active_base(config), health_path),
+                    }
                 )
                 self._send(200, body, JSON)
                 return
@@ -498,11 +628,20 @@ def make_handler(config: Config):
                 return
             try:
                 raw = read_body(self.rfile, self.headers.get("Content-Length"))
-                payload = chat_body(raw, config.model)
+                payload = chat_body(raw, config.model, config.provider)
             except ValueError as err:
                 self._reject(err, rid)
                 return
-            outcome = run_chat(config.ollama_base, payload, self.connection)
+            if config.provider == "lmstudio":
+                outcome = run_chat(
+                    config.lmstudio_base,
+                    payload,
+                    self.connection,
+                    "/v1/chat/completions",
+                    lmstudio_reply,
+                )
+            else:
+                outcome = run_chat(config.ollama_base, payload, self.connection)
             if outcome is None:
                 return
             status, body = outcome
@@ -518,7 +657,7 @@ def main() -> None:
         print(str(err), file=sys.stderr)
         raise SystemExit(1) from None
     print(f"Chat UI → http://{config.host}:{config.port}")
-    print(f"Proxy  → {config.ollama_base}  model={config.model}")
+    print(f"Proxy  → {config.provider} {active_base(config)}  model={config.model}")
     httpd = ThreadingHTTPServer((config.host, config.port), make_handler(config))
     httpd.serve_forever()
 

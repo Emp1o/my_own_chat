@@ -805,5 +805,466 @@ class ReliabilityTests(unittest.TestCase):
         self.assertIsNone(rejected)
 
 
+def openai_reply(text: str, reasoning: str = "") -> bytes:
+    message = {"role": "assistant", "content": text}
+    if reasoning:
+        message["reasoning"] = reasoning
+    return json.dumps({"choices": [{"message": message}]}).encode()
+
+
+def lm_config(port: int, model: str = "qwen/qwen3.5-9b") -> server.Config:
+    return server.Config(
+        ollama_base="",
+        model=model,
+        host="127.0.0.1",
+        port=8765,
+        root=ROOT,
+        provider="lmstudio",
+        lmstudio_base=f"http://127.0.0.1:{port}",
+    )
+
+
+class RecordingStudio(BaseHTTPRequestHandler):
+    status = 200
+    payload = b""
+    last = b""
+    path = ""
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        RecordingStudio.last = self.rfile.read(length) if length else b""
+        RecordingStudio.path = self.path
+        body = self.payload
+        self.send_response(self.status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:
+        RecordingStudio.path = self.path
+        RecordingStudio.last = b""
+        body = self.payload or b'{"data":[]}'
+        self.send_response(self.status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt: str, *args) -> None:
+        return
+
+
+class LmStudioTests(unittest.TestCase):
+    def test_ollama_remains_the_default(self) -> None:
+        with env_set(
+            CHAT_PROVIDER=None,
+            LMSTUDIO_BASE="http://127.0.0.1:1234",
+            LMSTUDIO_MODEL="qwen/qwen3.5-9b",
+            OLLAMA_BASE="http://100.64.0.2:11434",
+            OLLAMA_MODEL=None,
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                cfg = server.config_from_env(root=Path(tmp))
+        self.assertEqual(cfg.provider, "ollama")
+        self.assertEqual(cfg.ollama_base, "http://100.64.0.2:11434")
+        self.assertEqual(cfg.lmstudio_base, "")
+        self.assertEqual(cfg.model, "qwen2.5:1.5b")
+
+    def test_explicit_loopback_and_model_are_required(self) -> None:
+        rejected = (
+            "http://100.64.0.2:1234",
+            "http://10.1.2.3:1234",
+            "http://8.8.8.8:1234",
+            "http://127.0.0.2:1234",
+            "http://127.0.0.1:1234/v1",
+            "http://user:pass@127.0.0.1:1234",
+            "file:///tmp/model",
+        )
+        for base in rejected:
+            with self.subTest(base=base):
+                with env_set(
+                    CHAT_PROVIDER="lmstudio",
+                    LMSTUDIO_BASE=base,
+                    LMSTUDIO_MODEL="qwen/qwen3.5-9b",
+                    OLLAMA_BASE="http://8.8.8.8:11434",
+                ):
+                    with tempfile.TemporaryDirectory() as tmp:
+                        with self.assertRaises(ValueError) as caught:
+                            server.config_from_env(root=Path(tmp))
+                self.assertIn("LMSTUDIO_BASE", str(caught.exception))
+                self.assertNotIn("8.8.8.8", str(caught.exception))
+        with env_set(
+            CHAT_PROVIDER="lmstudio",
+            LMSTUDIO_BASE="http://localhost:1234/",
+            LMSTUDIO_MODEL="qwen/qwen3.5-9b",
+            OLLAMA_BASE=None,
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                cfg = server.config_from_env(root=Path(tmp))
+        self.assertEqual(cfg.lmstudio_base, "http://127.0.0.1:1234")
+        self.assertEqual(cfg.ollama_base, "")
+        with env_set(CHAT_PROVIDER="cloud", OLLAMA_BASE="http://127.0.0.1:11434"):
+            with tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(ValueError) as caught:
+                    server.config_from_env(root=Path(tmp))
+        self.assertIn("CHAT_PROVIDER", str(caught.exception))
+        with env_set(CHAT_PROVIDER="lmstudio", LMSTUDIO_BASE="http://127.0.0.1:1234", LMSTUDIO_MODEL=None):
+            with tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(ValueError):
+                    server.config_from_env(root=Path(tmp))
+
+    def test_file_sets_lmstudio_and_env_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "chat.local.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "provider": "lmstudio",
+                        "lmstudio_base": "http://127.0.0.1:1234",
+                        "model": "google/gemma-4-e4b",
+                        "ollama_base": "http://10.0.0.8:11434",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with env_set(CHAT_PROVIDER=None, LMSTUDIO_BASE=None, LMSTUDIO_MODEL=None, OLLAMA_BASE=None):
+                cfg = server.config_from_env(root=Path(tmp))
+            self.assertEqual(cfg.provider, "lmstudio")
+            self.assertEqual(cfg.model, "google/gemma-4-e4b")
+            self.assertEqual(cfg.lmstudio_base, "http://127.0.0.1:1234")
+            with env_set(
+                CHAT_PROVIDER="lmstudio",
+                LMSTUDIO_BASE="http://127.0.0.1:1235",
+                LMSTUDIO_MODEL="qwen/qwen3.5-9b",
+            ):
+                cfg = server.config_from_env(root=Path(tmp))
+        self.assertEqual(cfg.lmstudio_base, "http://127.0.0.1:1235")
+        self.assertEqual(cfg.model, "qwen/qwen3.5-9b")
+
+    def test_chat_is_openai_compatible_and_hides_reasoning(self) -> None:
+        RecordingStudio.status = 200
+        RecordingStudio.payload = openai_reply("привет", "scratch")
+        RecordingStudio.last = b""
+        upstream, upstream_thread = listen(RecordingStudio)
+        proxy, proxy_thread = listen(server.make_handler(lm_config(upstream.server_address[1])))
+        try:
+            payload = json.dumps(
+                {
+                    "model": "other/model",
+                    "lmstudio_base": "http://127.0.0.1:9",
+                    "tools": [{"type": "function", "function": {"name": "mcp"}}],
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "ты здесь?",
+                            "image_url": "http://127.0.0.1:9/secret.png",
+                        }
+                    ],
+                }
+            ).encode()
+            status, _, body = http_call(proxy.server_address[1], "/api/chat?lmstudio_base=http://8.8.8.8:1", payload)
+        finally:
+            stop(proxy, proxy_thread)
+            stop(upstream, upstream_thread)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["message"]["content"], "привет")
+        self.assertNotIn(b"scratch", body)
+        self.assertNotIn(b"8.8.8.8", body)
+        sent = json.loads(RecordingStudio.last)
+        self.assertEqual(RecordingStudio.path, "/v1/chat/completions")
+        self.assertEqual(
+            set(sent),
+            {"model", "messages", "stream", "max_tokens", "reasoning_effort"},
+        )
+        self.assertEqual(sent["model"], "qwen/qwen3.5-9b")
+        self.assertFalse(sent["stream"])
+        self.assertEqual(sent["max_tokens"], server.LMSTUDIO_MAX_TOKENS)
+        self.assertEqual(sent["reasoning_effort"], "none")
+        self.assertEqual(set(sent["messages"][0]), {"role", "content"})
+        self.assertEqual(sent["messages"][0]["content"], "ты здесь?")
+
+    def test_reasoning_only_reply_is_not_shown(self) -> None:
+        RecordingStudio.status = 200
+        RecordingStudio.payload = openai_reply("  ", "hidden-chain")
+        upstream, upstream_thread = listen(RecordingStudio)
+        proxy, proxy_thread = listen(server.make_handler(lm_config(upstream.server_address[1])))
+        try:
+            status, _, body = http_call(
+                proxy.server_address[1],
+                "/api/chat",
+                b'{"messages":[{"role":"user","content":"x"}]}',
+            )
+        finally:
+            stop(proxy, proxy_thread)
+            stop(upstream, upstream_thread)
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(body)["error"], "unreachable")
+        self.assertNotIn(b"hidden-chain", body)
+
+    def test_upstream_error_does_not_echo_the_prompt(self) -> None:
+        secret = "session-secret-phrase"
+        RecordingStudio.status = 500
+        RecordingStudio.payload = secret.encode()
+        upstream, upstream_thread = listen(RecordingStudio)
+        proxy, proxy_thread = listen(server.make_handler(lm_config(upstream.server_address[1])))
+        captured = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(captured):
+                status, _, body = http_call(
+                    proxy.server_address[1],
+                    "/api/chat",
+                    json.dumps({"messages": [{"role": "user", "content": secret}]}).encode(),
+                )
+        finally:
+            stop(proxy, proxy_thread)
+            stop(upstream, upstream_thread)
+        self.assertEqual(status, 500)
+        self.assertEqual(json.loads(body)["error"], "unreachable")
+        self.assertNotIn(secret.encode(), body)
+        self.assertNotIn(secret, captured.getvalue())
+
+    def test_health_checks_models_not_tags(self) -> None:
+        RecordingStudio.status = 200
+        RecordingStudio.payload = b'{"data":[{"id":"qwen/qwen3.5-9b"}]}'
+        RecordingStudio.path = ""
+        upstream, upstream_thread = listen(RecordingStudio)
+        proxy, proxy_thread = listen(server.make_handler(lm_config(upstream.server_address[1])))
+        try:
+            status, _, body = http_call(proxy.server_address[1], "/api/health")
+            cfg_status, _, cfg_body = http_call(
+                proxy.server_address[1],
+                "/api/config?provider=ollama&lmstudio_base=http://8.8.8.8:9",
+            )
+        finally:
+            stop(proxy, proxy_thread)
+            stop(upstream, upstream_thread)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["backend"], "ok")
+        self.assertEqual(RecordingStudio.path, "/v1/models")
+        self.assertNotIn(b"messages", body)
+        self.assertEqual(cfg_status, 200)
+        reported = json.loads(cfg_body)
+        self.assertEqual(reported["provider"], "lmstudio")
+        self.assertEqual(reported["model"], "qwen/qwen3.5-9b")
+        self.assertTrue(reported["upstream"].startswith("http://127.0.0.1:"))
+        self.assertNotIn("8.8.8.8", cfg_body.decode())
+
+    def test_offline_health_stays_a_proxy_ok(self) -> None:
+        proxy, proxy_thread = listen(server.make_handler(lm_config(9)))
+        try:
+            status, _, body = http_call(proxy.server_address[1], "/api/health")
+        finally:
+            stop(proxy, proxy_thread)
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data["proxy"], "ok")
+        self.assertEqual(data["backend"], "refused")
+
+    def test_redirect_is_not_followed(self) -> None:
+        hits = {"n": 0}
+
+        class Secret(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                hits["n"] += 1
+                body = b"secret"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt: str, *args) -> None:
+                return
+
+        class Bounce(BaseHTTPRequestHandler):
+            location = ""
+
+            def do_POST(self) -> None:
+                self.send_response(302)
+                self.send_header("Location", Bounce.location)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, fmt: str, *args) -> None:
+                return
+
+        secret, secret_thread = listen(Secret)
+        Bounce.location = f"http://127.0.0.1:{secret.server_address[1]}/secret"
+        bounce, bounce_thread = listen(Bounce)
+        proxy, proxy_thread = listen(server.make_handler(lm_config(bounce.server_address[1])))
+        try:
+            status, _, body = http_call(
+                proxy.server_address[1],
+                "/api/chat",
+                b'{"messages":[{"role":"user","content":"x"}]}',
+            )
+        finally:
+            stop(proxy, proxy_thread)
+            stop(bounce, bounce_thread)
+            stop(secret, secret_thread)
+        self.assertEqual(status, 502)
+        self.assertEqual(hits["n"], 0)
+        self.assertNotIn(b"secret", body)
+
+    def test_timeout_busy_and_cancel_keep_one_slot(self) -> None:
+        class Hang(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                time.sleep(8)
+
+            def log_message(self, fmt: str, *args) -> None:
+                return
+
+        upstream, upstream_thread = listen(Hang)
+        proxy, proxy_thread = listen(server.make_handler(lm_config(upstream.server_address[1])))
+        with env_set(OLLAMA_CONNECT_TIMEOUT="0.3", OLLAMA_READ_TIMEOUT="0.4"):
+            started = time.monotonic()
+            try:
+                status, _, body = http_call(
+                    proxy.server_address[1],
+                    "/api/chat",
+                    b'{"messages":[{"role":"user","content":"x"}]}',
+                    timeout=3,
+                )
+            finally:
+                stop(proxy, proxy_thread)
+                stop(upstream, upstream_thread)
+        self.assertLess(time.monotonic() - started, 2.5)
+        self.assertEqual(status, 504)
+        self.assertEqual(json.loads(body)["error"], "timeout")
+
+        class Gate(BaseHTTPRequestHandler):
+            started = threading.Event()
+            release = threading.Event()
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                if length:
+                    self.rfile.read(length)
+                Gate.started.set()
+                Gate.release.wait(3)
+                body = openai_reply("первый")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt: str, *args) -> None:
+                return
+
+        Gate.started.clear()
+        Gate.release.clear()
+        upstream, upstream_thread = listen(Gate)
+        proxy, proxy_thread = listen(server.make_handler(lm_config(upstream.server_address[1])))
+        first: dict = {}
+
+        def run_first() -> None:
+            first["result"] = http_call(
+                proxy.server_address[1],
+                "/api/chat",
+                b'{"messages":[{"role":"user","content":"hold"}]}',
+                timeout=5,
+            )
+
+        worker = threading.Thread(target=run_first)
+        worker.start()
+        try:
+            self.assertTrue(Gate.started.wait(2))
+            status, _, body = http_call(
+                proxy.server_address[1],
+                "/api/chat",
+                b'{"messages":[{"role":"user","content":"later"}]}',
+            )
+            self.assertEqual(status, 429)
+            self.assertEqual(json.loads(body)["error"], "busy")
+            Gate.release.set()
+            worker.join(5)
+        finally:
+            Gate.release.set()
+            stop(proxy, proxy_thread)
+            stop(upstream, upstream_thread)
+        self.assertEqual(first["result"][0], 200)
+
+        class Hold(BaseHTTPRequestHandler):
+            holding = threading.Event()
+            dropped = threading.Event()
+            phase = 0
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                if length:
+                    self.rfile.read(length)
+                if Hold.phase == 0:
+                    Hold.phase = 1
+                    Hold.holding.set()
+                    self.connection.settimeout(3)
+                    try:
+                        chunk = self.connection.recv(1)
+                    except OSError:
+                        Hold.dropped.set()
+                        return
+                    if chunk == b"":
+                        Hold.dropped.set()
+                    return
+                body = openai_reply("дальше")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt: str, *args) -> None:
+                return
+
+        Hold.holding.clear()
+        Hold.dropped.clear()
+        Hold.phase = 0
+        upstream, upstream_thread = listen(Hold)
+        proxy, proxy_thread = listen(server.make_handler(lm_config(upstream.server_address[1])))
+        try:
+            sock = socket.create_connection(("127.0.0.1", proxy.server_address[1]))
+            raw = b'{"messages":[{"role":"user","content":"cancel-me"}]}'
+            request = (
+                b"POST /api/chat HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(raw)).encode() + b"\r\n"
+                b"Connection: close\r\n\r\n" + raw
+            )
+            sock.sendall(request)
+            self.assertTrue(Hold.holding.wait(2))
+            sock.close()
+            self.assertTrue(Hold.dropped.wait(2))
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{proxy.server_address[1]}/api/chat",
+                data=b'{"messages":[{"role":"user","content":"next"}]}',
+                method="POST",
+                headers={"Content-Type": "application/json", "X-Request-Id": "17"},
+            )
+            echoed = None
+            status = 429
+            body = b""
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    with urllib.request.urlopen(req, timeout=2) as resp:
+                        status = resp.status
+                        echoed = resp.headers.get("X-Request-Id")
+                        body = resp.read()
+                except urllib.error.HTTPError as err:
+                    status = err.code
+                    body = err.read()
+                if status != 429:
+                    break
+                time.sleep(0.05)
+        finally:
+            stop(proxy, proxy_thread)
+            stop(upstream, upstream_thread)
+        self.assertEqual(status, 200)
+        self.assertEqual(echoed, "17")
+        self.assertNotIn(b"cancel-me", body)
+        self.assertEqual(json.loads(body)["message"]["content"], "дальше")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -274,6 +274,8 @@ def parse_object(raw: bytes) -> dict:
         raise ValueError("messages required")
     try:
         data = json.loads(raw.decode("utf-8"))
+    except RecursionError:
+        raise ValueError("bad json") from None
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise ValueError("bad json") from None
     if not isinstance(data, dict):
@@ -303,12 +305,18 @@ def clean_message(item: object) -> dict:
     text = content.strip()
     if not text or len(text) > MAX_CONTENT:
         raise ValueError("bad message")
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("bad message") from None
     return {"role": role, "content": text}
 
 
 def clean_messages(items: object) -> list:
-    if not isinstance(items, list) or len(items) == 0:
+    if items is None or (isinstance(items, list) and len(items) == 0):
         raise ValueError("messages required")
+    if not isinstance(items, list):
+        raise ValueError("bad message")
     if len(items) > MAX_MESSAGES:
         raise ValueError("too many messages")
     return [clean_message(item) for item in items]
@@ -381,6 +389,73 @@ def request_id(header: str | None) -> str | None:
     if header and re.fullmatch(r"[0-9]{1,20}", header.strip()):
         return header.strip()
     return None
+
+
+def header_values(headers, name: str) -> list[str]:
+    values = headers.get_all(name)
+    if not values:
+        return []
+    return [value for value in values if isinstance(value, str)]
+
+
+def host_header_ok(value: str, port: int) -> bool:
+    # "127.0.0.1" without a port is a direct client. Browsers send the real port.
+    raw = value.strip().lower()
+    if raw == "" or any(char in raw for char in " \t@/?#[]\\"):
+        return False
+    if raw.count(":") > 1:
+        return False
+    if ":" in raw:
+        host, host_port = raw.split(":", 1)
+        if host_port != str(port):
+            return False
+    else:
+        host = raw
+    return host in {"127.0.0.1", "localhost"}
+
+
+def origin_header_ok(value: str | None, port: int) -> bool:
+    if value is None:
+        return True
+    raw = value.strip()
+    if raw == "":
+        return True
+    if any(char in raw for char in "\r\n\t "):
+        return False
+    parts = urllib.parse.urlsplit(raw)
+    if parts.username or parts.password or parts.query or parts.fragment:
+        return False
+    if parts.scheme.lower() != "http" or parts.path not in {""}:
+        return False
+    host = (parts.hostname or "").lower()
+    if host not in {"127.0.0.1", "localhost"}:
+        return False
+    try:
+        seen = parts.port
+    except ValueError:
+        return False
+    if seen is None:
+        seen = 80
+    return seen == port
+
+
+def local_request_ok(headers, port: int) -> bool:
+    hosts = header_values(headers, "Host")
+    if len(hosts) != 1 or not host_header_ok(hosts[0], port):
+        return False
+    origins = header_values(headers, "Origin")
+    if len(origins) > 1:
+        return False
+    origin = origins[0] if origins else None
+    return origin_header_ok(origin, port)
+
+
+def json_content_type(headers) -> bool:
+    values = header_values(headers, "Content-Type")
+    if len(values) != 1:
+        return False
+    media = values[0].split(";", 1)[0].strip().lower()
+    return media == "application/json"
 
 
 def client_closed(conn: socket.socket) -> bool:
@@ -484,19 +559,55 @@ def transport_error(err: OSError) -> tuple[int, bytes]:
     return status, error_bytes(code)
 
 
+def ollama_public_error(body: bytes) -> str:
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, RecursionError):
+        return "unreachable"
+    if not isinstance(data, dict):
+        return "unreachable"
+    err = data.get("error")
+    if not isinstance(err, str):
+        return "unreachable"
+    text = err.strip()
+    if text in BACKEND_CODES or text == "model not found":
+        return text
+    prefix = "model '"
+    suffix = "' not found"
+    if text.startswith(prefix) and text.endswith(suffix):
+        model_id = text[len(prefix):-len(suffix)]
+        if model_id and MODEL_RE.fullmatch(model_id):
+            return text
+    return "unreachable"
+
+
+def ollama_reply(status: int, body: bytes) -> tuple[int, bytes]:
+    if status != 200:
+        return status, error_bytes(ollama_public_error(body))
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, RecursionError):
+        return 502, error_bytes("unreachable")
+    message = data.get("message") if isinstance(data, dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str):
+        return 502, error_bytes("unreachable")
+    return 200, body
+
+
 def lmstudio_reply(status: int, body: bytes) -> tuple[int, bytes]:
     if status != 200:
         code = None
         try:
             parsed = json.loads(body).get("error")
-        except (UnicodeError, json.JSONDecodeError, AttributeError):
+        except (UnicodeError, json.JSONDecodeError, AttributeError, RecursionError):
             parsed = None
-        if parsed in BACKEND_CODES:
-            code = str(parsed)
+        if isinstance(parsed, str) and parsed in BACKEND_CODES:
+            code = parsed
         return status, error_bytes(code or "unreachable")
     try:
         data = json.loads(body.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError):
+    except (UnicodeError, json.JSONDecodeError, RecursionError):
         return 502, error_bytes("unreachable")
     choices = data.get("choices") if isinstance(data, dict) else None
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
@@ -518,10 +629,10 @@ def probe_backend(base: str, path: str = "/api/tags") -> str:
         return "ok"
     try:
         code = json.loads(body).get("error")
-    except (json.JSONDecodeError, UnicodeError, AttributeError):
+    except (json.JSONDecodeError, UnicodeError, AttributeError, RecursionError):
         return "unreachable"
-    if code in BACKEND_CODES:
-        return str(code)
+    if isinstance(code, str) and code in BACKEND_CODES:
+        return code
     return "unreachable"
 
 
@@ -587,7 +698,17 @@ def make_handler(config: Config):
             code = 413 if str(err) == "body too large" else 400
             self._send(code, error_bytes(str(err)), JSON, rid)
 
+        def _allowed(self) -> bool:
+            port = self.server.server_address[1]
+            if isinstance(port, int) and local_request_ok(self.headers, port):
+                return True
+            self.close_connection = True
+            self._send(403, error_bytes("forbidden"), JSON, request_id(self.headers.get("X-Request-Id")))
+            return False
+
         def do_GET(self) -> None:
+            if not self._allowed():
+                return
             route = self.path.split("?", 1)[0]
             if route == "/api/config":
                 body = json_bytes(
@@ -621,14 +742,23 @@ def make_handler(config: Config):
             self._send(200, body, page[1])
 
         def do_POST(self) -> None:
+            if not self._allowed():
+                return
             route = self.path.split("?", 1)[0]
             rid = request_id(self.headers.get("X-Request-Id"))
             if route != "/api/chat":
                 self._missing()
                 return
+            if not json_content_type(self.headers):
+                self.close_connection = True
+                self._send(415, error_bytes("unsupported type"), JSON, rid)
+                return
             try:
                 raw = read_body(self.rfile, self.headers.get("Content-Length"))
                 payload = chat_body(raw, config.model, config.provider)
+            except RecursionError:
+                self._reject(ValueError("bad json"), rid)
+                return
             except ValueError as err:
                 self._reject(err, rid)
                 return
@@ -641,7 +771,12 @@ def make_handler(config: Config):
                     lmstudio_reply,
                 )
             else:
-                outcome = run_chat(config.ollama_base, payload, self.connection)
+                outcome = run_chat(
+                    config.ollama_base,
+                    payload,
+                    self.connection,
+                    adapt=ollama_reply,
+                )
             if outcome is None:
                 return
             status, body = outcome

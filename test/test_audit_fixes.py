@@ -191,13 +191,60 @@ class LocalRequestTests(GuardFixture):
                     {
                         "Host": f"127.0.0.1:{self.port}",
                         "Origin": origin,
-                        "Content-Type": "text/plain;charset=UTF-8",
+                        "Content-Type": "application/json",
                         "Sec-Fetch-Site": "cross-site",
                     },
                 )
-                self.assertIn(status, (403, 415))
+                self.assertEqual(status, 403)
+                self.assertEqual(json.loads(body)["error"], "forbidden")
                 self.assertEqual(CountingUpstream.hits, 0)
                 self.assertNotIn(SECRET.encode(), body)
+
+    def test_two_origin_headers_are_forbidden(self) -> None:
+        good = f"http://127.0.0.1:{self.port}"
+        bad = "https://evil.example"
+        for first, second in ((bad, good), (good, bad)):
+            with self.subTest(first=first, second=second):
+                CountingUpstream.hits = 0
+                status, _, body = self.call(
+                    "POST",
+                    "/api/chat",
+                    CHAT,
+                    {
+                        "Host": f"127.0.0.1:{self.port}",
+                        "Origin": first,
+                        "Content-Type": "application/json",
+                        "Extra": [f"Origin: {second}"],
+                    },
+                )
+                self.assertEqual(status, 403)
+                self.assertEqual(json.loads(body)["error"], "forbidden")
+                self.assertEqual(CountingUpstream.hits, 0)
+
+    def test_dotted_localhost_host_is_forbidden(self) -> None:
+        status, _, body = self.call(
+            "POST",
+            "/api/chat",
+            CHAT,
+            {"Host": "localhost.", "Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(json.loads(body)["error"], "forbidden")
+        self.assertEqual(CountingUpstream.hits, 0)
+
+    def test_ipv6_loopback_host_is_forbidden(self) -> None:
+        status, _, body = self.call(
+            "POST",
+            "/api/chat",
+            CHAT,
+            {
+                "Host": f"[::1]:{self.port}",
+                "Content-Type": "application/json",
+            },
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(json.loads(body)["error"], "forbidden")
+        self.assertEqual(CountingUpstream.hits, 0)
 
     def test_simple_content_types_do_not_reach_upstream(self) -> None:
         for content_type in (

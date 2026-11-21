@@ -506,6 +506,14 @@ class UpstreamErrorTests(GuardFixture):
         self.assertNotIn(SECRET.encode(), body)
         self.assertNotIn(b"memory", body)
 
+    def test_http_200_error_field_is_backend_error(self) -> None:
+        CountingUpstream.status = 200
+        CountingUpstream.payload = b'{"error":"oops"}'
+        status, _, body = self._chat()
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(body), {"error": "backend_error"})
+        self.assertNotIn(b"oops", body)
+
     def test_model_not_found_is_kept_without_extra_fields(self) -> None:
         CountingUpstream.status = 404
         CountingUpstream.payload = json.dumps(
@@ -684,7 +692,7 @@ class PageCopyTests(unittest.TestCase):
     def test_backend_error_has_its_own_sentence(self) -> None:
         text = (ROOT / "index.html").read_text(encoding="utf-8")
         self.assertIn(
-            'backend_error: "Модель ответила ошибкой. Проверьте память и логи Ollama."',
+            'backend_error: "Модель ответила ошибкой. Проверьте память и логи Ollama. Текст снова в поле."',
             text,
         )
         self.assertIn(

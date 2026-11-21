@@ -480,8 +480,9 @@ class UpstreamErrorTests(GuardFixture):
         status, headers, body = self._chat()
         self.assertEqual(status, 500)
         self.assertIn("application/json", headers.get("content-type", ""))
-        self.assertEqual(json.loads(body)["error"], "unreachable")
+        self.assertEqual(json.loads(body), {"error": "backend_error"})
         self.assertNotIn(SECRET.encode(), body)
+        self.assertNotIn(b"blew up", body)
         self.assertEqual(CountingUpstream.hits, 1)
 
     def test_object_upstream_error_hides_the_prompt(self) -> None:
@@ -491,8 +492,19 @@ class UpstreamErrorTests(GuardFixture):
         ).encode()
         status, _, body = self._chat()
         self.assertEqual(status, 500)
-        self.assertEqual(json.loads(body), {"error": "unreachable"})
+        self.assertEqual(json.loads(body), {"error": "backend_error"})
         self.assertNotIn(SECRET.encode(), body)
+
+    def test_oom_error_field_is_backend_error(self) -> None:
+        CountingUpstream.status = 500
+        CountingUpstream.payload = json.dumps(
+            {"error": f"model requires more system memory ({SECRET})"}
+        ).encode()
+        status, _, body = self._chat()
+        self.assertEqual(status, 500)
+        self.assertEqual(json.loads(body), {"error": "backend_error"})
+        self.assertNotIn(SECRET.encode(), body)
+        self.assertNotIn(b"memory", body)
 
     def test_model_not_found_is_kept_without_extra_fields(self) -> None:
         CountingUpstream.status = 404
@@ -516,8 +528,15 @@ class UpstreamErrorTests(GuardFixture):
         ).encode()
         status, _, body = self._chat()
         self.assertEqual(status, 404)
-        self.assertEqual(json.loads(body)["error"], "unreachable")
+        self.assertEqual(json.loads(body), {"error": "backend_error"})
         self.assertNotIn(SECRET.encode(), body)
+
+    def test_transport_codes_stay_refused_and_timeout(self) -> None:
+        for status_code, name in ((502, "refused"), (504, "timeout"), (502, "name")):
+            with self.subTest(name=name):
+                status, body = server.ollama_reply(status_code, server.error_bytes(name))
+                self.assertEqual(status, status_code)
+                self.assertEqual(json.loads(body), {"error": name})
 
     def test_non_json_success_is_not_forwarded(self) -> None:
         CountingUpstream.status = 200
@@ -603,6 +622,19 @@ class LmStudioErrorTests(unittest.TestCase):
         self.assertNotIn(SECRET.encode(), body)
         self.assertNotIn("Traceback", stderr.getvalue())
         self.assertEqual(CountingUpstream.hits, 1)
+
+
+class PageCopyTests(unittest.TestCase):
+    def test_backend_error_has_its_own_sentence(self) -> None:
+        text = (ROOT / "index.html").read_text(encoding="utf-8")
+        self.assertIn(
+            'backend_error: "Модель ответила ошибкой. Проверьте память и логи Ollama."',
+            text,
+        )
+        self.assertIn(
+            'unreachable: "Сеть до Ollama оборвалась. Проверьте Tailscale. Текст снова в поле."',
+            text,
+        )
 
 
 if __name__ == "__main__":

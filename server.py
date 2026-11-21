@@ -76,7 +76,7 @@ PAGES = {
     "/base.css": ("base.css", "text/css; charset=utf-8"),
 }
 CHAT_SLOT = threading.BoundedSemaphore(1)
-BACKEND_CODES = frozenset({"timeout", "refused", "name", "unreachable"})
+BACKEND_CODES = frozenset({"timeout", "refused", "name", "unreachable", "backend_error"})
 
 
 @dataclass(frozen=True)
@@ -563,12 +563,12 @@ def ollama_public_error(body: bytes) -> str:
     try:
         data = json.loads(body.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError, RecursionError):
-        return "unreachable"
+        return "backend_error"
     if not isinstance(data, dict):
-        return "unreachable"
+        return "backend_error"
     err = data.get("error")
     if not isinstance(err, str):
-        return "unreachable"
+        return "backend_error"
     text = err.strip()
     if text in BACKEND_CODES or text == "model not found":
         return text
@@ -578,7 +578,7 @@ def ollama_public_error(body: bytes) -> str:
         model_id = text[len(prefix):-len(suffix)]
         if model_id and MODEL_RE.fullmatch(model_id):
             return text
-    return "unreachable"
+    return "backend_error"
 
 
 def ollama_reply(status: int, body: bytes) -> tuple[int, bytes]:
@@ -591,6 +591,8 @@ def ollama_reply(status: int, body: bytes) -> tuple[int, bytes]:
     message = data.get("message") if isinstance(data, dict) else None
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str):
+        if isinstance(data, dict) and "error" in data:
+            return 502, error_bytes(ollama_public_error(body))
         return 502, error_bytes("unreachable")
     return 200, body
 

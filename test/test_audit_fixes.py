@@ -624,6 +624,62 @@ class LmStudioErrorTests(unittest.TestCase):
         self.assertEqual(CountingUpstream.hits, 1)
 
 
+def closed_port() -> int:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+    finally:
+        sock.close()
+
+
+class OfflineHealthTests(unittest.TestCase):
+    def _health(self, cfg: server.Config) -> tuple[int | None, dict]:
+        proxy, thread = listen(server.make_handler(cfg))
+        port = proxy.server_address[1]
+        try:
+            status, _, body = raw_call(
+                port,
+                "GET",
+                "/api/health",
+                headers={"Host": f"127.0.0.1:{port}"},
+                timeout=2,
+            )
+        finally:
+            stop(proxy, thread)
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertEqual(set(data), {"proxy", "backend"})
+        self.assertEqual(data["proxy"], "ok")
+        self.assertIsInstance(data["backend"], str)
+        self.assertIn(data["backend"], server.BACKEND_CODES)
+        return status, data
+
+    def test_closed_port_health_is_a_backend_code(self) -> None:
+        cfg = server.Config(
+            ollama_base=f"http://127.0.0.1:{closed_port()}",
+            model="qwen2.5:1.5b",
+            host="127.0.0.1",
+            port=8765,
+            root=ROOT,
+        )
+        _, data = self._health(cfg)
+        self.assertEqual(data["backend"], "refused")
+
+    def test_lmstudio_closed_port_health_is_a_backend_code(self) -> None:
+        cfg = server.Config(
+            ollama_base="",
+            model="qwen/qwen3.5-9b",
+            host="127.0.0.1",
+            port=8765,
+            root=ROOT,
+            provider="lmstudio",
+            lmstudio_base=f"http://127.0.0.1:{closed_port()}",
+        )
+        _, data = self._health(cfg)
+        self.assertEqual(data["backend"], "refused")
+
+
 class PageCopyTests(unittest.TestCase):
     def test_backend_error_has_its_own_sentence(self) -> None:
         text = (ROOT / "index.html").read_text(encoding="utf-8")
